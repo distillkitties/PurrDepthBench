@@ -1,0 +1,6 @@
+# PurrDepthBench 🐱💻
+
+**PurrDepthBench** evaluates how many fix cycles distilled LLMs need to recover from injected bugs — going beyond single-shot pass@k to measure true agentic resilience.
+
+- Key metric: **Recovery Depth** (cycles to restore correctness)
+- Focus: Distilled models vs frontier (coming soon)
