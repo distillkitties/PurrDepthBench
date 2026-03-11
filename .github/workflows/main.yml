@@ -1,4 +1,4 @@
-name: LLM Coding Recovery Benchmark
+name: PurrDepthBench – All Qwopus Variants in Parallel
 
 on:
   push:
@@ -8,35 +8,96 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-benchmark:
+  test-qwopus:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    strategy:
+      matrix:
+        variant:
+          - qwen3.5:2b-claude-4.6-opus-reasoning-distilled
+          - qwen3.5:4b-claude-4.6-opus-reasoning-distilled
+          - qwen3.5:9b-claude-4.6-opus-reasoning-distilled
+          - qwen3.5:27b-claude-4.6-opus-reasoning-distilled
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run benchmark
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 10
+
+      - name: Pull Qwopus variant ${{ matrix.variant }}
+        run: ollama pull ${{ matrix.variant }}
+
+      - name: Run benchmark for ${{ matrix.variant }}
         env:
-          # Add API keys here if you switch to remote models
-          # ABACUS_API_KEY: ${{ secrets.ABACUS_API_KEY }}
+          MODEL_NAME: ${{ matrix.variant }}
         run: python benchmark.py
 
-      - name: Upload benchmark logs
+      - name: Upload logs for ${{ matrix.variant }}
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-logs
+          name: logs-${{ matrix.variant }}
           path: |
             **/*.log
             **/*.txt
-          retention-days: 90
+          retention-days: 7
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: test-qwopus
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate summary of completed variants
+        run: |
+          echo "## PurrDepthBench Qwopus Variants Run Summary" >> summary.md
+          echo "" >> summary.md
+          echo "Tested variants in parallel:" >> summary.md
+          echo "- qwen3.5:2b-claude-4.6-opus-reasoning-distilled" >> summary.md
+          echo "- qwen3.5:4b-claude-4.6-opus-reasoning-distilled" >> summary.md
+          echo "- qwen3.5:9b-claude-4.6-opus-reasoning-distilled" >> summary.md
+          echo "- qwen3.5:27b-claude-4.6-opus-reasoning-distilled" >> summary.md
+          echo "" >> summary.md
+          echo "### Completed Successfully:" >> summary.md
+          for model in 2b 4b 9b 27b; do
+            if [ -d "artifacts/logs-qwen3.5:${model}-claude-4.6-opus-reasoning-distilled" ] && [ -n "$(ls artifacts/logs-qwen3.5:${model}-claude-4.6-opus-reasoning-distilled 2>/dev/null)" ]; then
+              echo "- ✅ qwen3.5:${model}-claude-4.6-opus-reasoning-distilled" >> summary.md
+            else
+              echo "- ❌ qwen3.5:${model}-claude-4.6-opus-reasoning-distilled (failed or no logs)" >> summary.md
+            fi
+          done
+          echo "" >> summary.md
+          echo "Full logs are attached as artifacts for each variant." >> summary.md
+
+      - name: Show summary in job output
+        run: cat summary.md
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwopus-run-summary
+          path: summary.md
