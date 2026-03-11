@@ -1,4 +1,4 @@
-name: PurrDepthBench – All Qwopus Variants in Parallel
+name: PurrDepthBench – All Qwopus Variants (2B/4B/9B/27B)
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
 jobs:
   test-qwopus:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     strategy:
       matrix:
@@ -29,10 +29,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies
+      - name: Install minimal Python dependencies inline
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install openai
 
       - name: Install and start Ollama
         run: |
@@ -76,22 +76,22 @@ jobs:
         run: |
           echo "## PurrDepthBench Qwopus Variants Run Summary" >> summary.md
           echo "" >> summary.md
-          echo "Tested variants in parallel:" >> summary.md
-          echo "- qwen3.5:2b-claude-4.6-opus-reasoning-distilled" >> summary.md
-          echo "- qwen3.5:4b-claude-4.6-opus-reasoning-distilled" >> summary.md
-          echo "- qwen3.5:9b-claude-4.6-opus-reasoning-distilled" >> summary.md
-          echo "- qwen3.5:27b-claude-4.6-opus-reasoning-distilled" >> summary.md
+          echo "Tested in parallel:" >> summary.md
+          echo "- 2B" >> summary.md
+          echo "- 4B" >> summary.md
+          echo "- 9B" >> summary.md
+          echo "- 27B" >> summary.md
           echo "" >> summary.md
           echo "### Completed Successfully:" >> summary.md
-          for model in 2b 4b 9b 27b; do
-            if [ -d "artifacts/logs-qwen3.5:${model}-claude-4.6-opus-reasoning-distilled" ] && [ -n "$(ls artifacts/logs-qwen3.5:${model}-claude-4.6-opus-reasoning-distilled 2>/dev/null)" ]; then
-              echo "- ✅ qwen3.5:${model}-claude-4.6-opus-reasoning-distilled" >> summary.md
+          for size in 2b 4b 9b 27b; do
+            if [ -d "artifacts/logs-qwen3.5:${size}-claude-4.6-opus-reasoning-distilled" ] && [ -n "$(ls artifacts/logs-qwen3.5:${size}-claude-4.6-opus-reasoning-distilled 2>/dev/null)" ]; then
+              echo "- ✅ qwen3.5:${size}-claude-4.6-opus-reasoning-distilled" >> summary.md
             else
-              echo "- ❌ qwen3.5:${model}-claude-4.6-opus-reasoning-distilled (failed or no logs)" >> summary.md
+              echo "- ❌ qwen3.5:${size}-claude-4.6-opus-reasoning-distilled (failed or no logs)" >> summary.md
             fi
           done
           echo "" >> summary.md
-          echo "Full logs are attached as artifacts for each variant." >> summary.md
+          echo "Full logs attached as artifacts for each variant." >> summary.md
 
       - name: Show summary in job output
         run: cat summary.md
