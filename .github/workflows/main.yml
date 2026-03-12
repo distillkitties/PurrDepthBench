@@ -1,35 +1,24 @@
-name: PurrDepthBench – llama.cpp mmap + retry
+name: Test llama.cpp mmap (no swap)
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  mmap-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    continue-on-error: true  # allows retry logic
-
-    strategy:
-      matrix:
-        size: [2b, 4b, 9b, 27b]
-        attempt: [1, 2, 3]  # retry up to 3 times
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install minimal Python deps inline
-        run: pip install openai
-
-      - name: Install build tools and clone llama.cpp
+      - name: Install build tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y build-essential git cmake ninja-build
+          sudo apt-get install -y build-essential git cmake ninja-build wget
+
+      - name: Clone and build llama.cpp server
+        run: |
           git clone https://github.com/ggerganov/llama.cpp.git
           cd llama.cpp
           cmake -B build -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
@@ -37,69 +26,71 @@ jobs:
           cp build/bin/llama-server ../llama-server
           cd ..
 
-      - name: Try to create 8 GB swap (best effort)
-        run: |
-          sudo fallocate -l 8G /swapfile || echo "Swap creation failed (expected on some runners)"
-          sudo chmod 600 /swapfile || true
-          sudo mkswap /swapfile || true
-          sudo swapon /swapfile || echo "Swap activation failed"
-          free -h || true
+      - name: Show initial memory (before any model)
+        run: free -h
 
-      - name: Download GGUF for ${{ matrix.size }}
+      - name: Download small GGUF (~2 GB, should fit in RAM)
         run: |
-          if [ "${{ matrix.size }}" = "2b" ]; then
-            wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-2b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf
-          elif [ "${{ matrix.size }}" = "4b" ]; then
-            wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-4b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf
-          elif [ "${{ matrix.size }}" = "9b" ]; then
-            wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-9b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf
-          elif [ "${{ matrix.size }}" = "27b" ]; then
-            wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-27b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf
-          fi
+          wget -O small.gguf https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 
-      - name: Start llama.cpp server with mmap
+      - name: Start server with small model + mmap
         run: |
           ./llama-server \
-            --model model.gguf \
+            --model small.gguf \
             --host 0.0.0.0 \
             --port 8080 \
-            --ctx-size 4096 \
+            --ctx-size 2048 \
             --mmap \
-            --n-gpu-layers 0 &  # CPU only
-          sleep 40  # give more time for large models
+            --n-gpu-layers 0 &  # CPU only, mmap on
+          sleep 30
 
-      - name: Run benchmark (attempt ${{ matrix.attempt }})
-        env:
-          MODEL_NAME: qwen3.5:${{ matrix.size }}-claude-4.6-opus-reasoning-distilled
-        run: python benchmark.py || echo "Run failed - retrying if attempts remain"
+      - name: Test small model inference
+        run: |
+          curl http://127.0.0.1:8080/v1/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "small.gguf",
+              "prompt": "Hello! Tell me a short joke.",
+              "max_tokens": 50,
+              "temperature": 0.7
+            }' || echo "Small inference failed"
 
-      - name: Upload logs for ${{ matrix.size }} attempt ${{ matrix.attempt }}
+      - name: Show memory after small model
+        run: free -h
+
+      - name: Download medium-large GGUF (~10–12 GB, pushes 14 GB RAM limit)
+        run: |
+          wget -O large.gguf https://huggingface.co/TheBloke/Llama-2-13B-chat-GGUF/resolve/main/llama-2-13b-chat.Q4_K_M.gguf || echo "Download failed (file too big or not found)"
+
+      - name: Try to start server with large model + mmap
+        run: |
+          ./llama-server \
+            --model large.gguf \
+            --host 0.0.0.0 \
+            --port 8080 \
+            --ctx-size 2048 \
+            --mmap \
+            --n-gpu-layers 0 &  # CPU only, mmap on
+          sleep 60 || echo "Large model server start timed out or failed"
+
+      - name: Test large model inference (expect slow or fail)
+        run: |
+          curl http://127.0.0.1:8080/v1/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "large.gguf",
+              "prompt": "Hello! Tell me a short joke.",
+              "max_tokens": 50,
+              "temperature": 0.7
+            }' || echo "Large inference failed (expected due to paging/OOM)"
+
+      - name: Final memory status
+        run: free -h || true
+
+      - name: Upload logs & artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.size }}-attempt-${{ matrix.attempt }}
-          path: ./*.log ./*.txt
+          name: mmap-test-results
+          path: ./*.log ./*.txt ./*.gguf
           retention-days: 7
-
-  summary:
-    runs-on: ubuntu-latest
-    needs: test
-    if: always()
-
-    steps:
-      - run: |
-          echo "## llama.cpp mmap Results (with retry)" >> summary.md
-          echo "" >> summary.md
-          echo "Tested sizes:" >> summary.md
-          echo "- 2B" >> summary.md
-          echo "- 4B" >> summary.md
-          echo "- 9B" >> summary.md
-          echo "- 27B" >> summary.md
-          echo "" >> summary.md
-          echo "Success status:" >> summary.md
-          for s in 2b 4b 9b 27b; do
-            echo "- $s: $( [ -d artifacts/logs-$s-attempt-1 ] && echo 'OK on attempt 1' || echo 'Failed all attempts')" >> summary.md
-          done
-          echo "" >> summary.md
-          echo "Full logs in artifacts." >> summary.md
-          cat summary.md
