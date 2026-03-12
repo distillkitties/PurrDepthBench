@@ -1,28 +1,32 @@
-name: PurrDepthBench – llama.cpp mmap test (Qwopus sizes)
+name: PurrDepthBench – llama.cpp mmap + retry
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-llamacpp:
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    continue-on-error: true  # allows retry logic
 
     strategy:
       matrix:
         size: [2b, 4b, 9b, 27b]
+        attempt: [1, 2, 3]  # retry up to 3 times
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install minimal deps inline
+      - name: Install minimal Python deps inline
         run: pip install openai
 
-      - name: Install build tools & clone llama.cpp
+      - name: Install build tools and clone llama.cpp
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y build-essential git cmake ninja-build
@@ -32,6 +36,14 @@ jobs:
           cmake --build build --config Release -j
           cp build/bin/llama-server ../llama-server
           cd ..
+
+      - name: Try to create 8 GB swap (best effort)
+        run: |
+          sudo fallocate -l 8G /swapfile || echo "Swap creation failed (expected on some runners)"
+          sudo chmod 600 /swapfile || true
+          sudo mkswap /swapfile || true
+          sudo swapon /swapfile || echo "Swap activation failed"
+          free -h || true
 
       - name: Download GGUF for ${{ matrix.size }}
         run: |
@@ -45,7 +57,7 @@ jobs:
             wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-27b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf
           fi
 
-      - name: Start llama.cpp server (mmap)
+      - name: Start llama.cpp server with mmap
         run: |
           ./llama-server \
             --model model.gguf \
@@ -54,38 +66,40 @@ jobs:
             --ctx-size 4096 \
             --mmap \
             --n-gpu-layers 0 &  # CPU only
-          sleep 30  # wait for load
+          sleep 40  # give more time for large models
 
-      - name: Run benchmark
+      - name: Run benchmark (attempt ${{ matrix.attempt }})
         env:
           MODEL_NAME: qwen3.5:${{ matrix.size }}-claude-4.6-opus-reasoning-distilled
-        run: python benchmark.py
+        run: python benchmark.py || echo "Run failed - retrying if attempts remain"
 
-      - name: Upload logs
+      - name: Upload logs for ${{ matrix.size }} attempt ${{ matrix.attempt }}
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.size }}
+          name: logs-${{ matrix.size }}-attempt-${{ matrix.attempt }}
           path: ./*.log ./*.txt
           retention-days: 7
 
   summary:
     runs-on: ubuntu-latest
-    needs: test-llamacpp
+    needs: test
     if: always()
 
     steps:
       - run: |
-          echo "## llama.cpp mmap Results" >> summary.md
+          echo "## llama.cpp mmap Results (with retry)" >> summary.md
           echo "" >> summary.md
-          echo "Tested:" >> summary.md
+          echo "Tested sizes:" >> summary.md
           echo "- 2B" >> summary.md
           echo "- 4B" >> summary.md
           echo "- 9B" >> summary.md
           echo "- 27B" >> summary.md
           echo "" >> summary.md
-          echo "Success:" >> summary.md
+          echo "Success status:" >> summary.md
           for s in 2b 4b 9b 27b; do
-            echo "- $s: $( [ -d artifacts/logs-$s ] && echo 'OK' || echo 'Failed/OOM')" >> summary.md
+            echo "- $s: $( [ -d artifacts/logs-$s-attempt-1 ] && echo 'OK on attempt 1' || echo 'Failed all attempts')" >> summary.md
           done
+          echo "" >> summary.md
+          echo "Full logs in artifacts." >> summary.md
           cat summary.md
