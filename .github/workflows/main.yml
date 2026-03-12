@@ -7,12 +7,12 @@ jobs:
   test-llamacpp:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    continue-on-error: true  # allows retry attempts
+    continue-on-error: true
 
     strategy:
       matrix:
         size: [2b, 4b, 9b, 27b]
-        attempt: [1, 2, 3]  # retry up to 3 times
+        attempt: [1, 2, 3]
 
     steps:
       - name: Checkout repository
@@ -28,10 +28,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install openai huggingface_hub[hf_transfer]
 
+      - name: Add pip bin to PATH (fix huggingface-cli not found)
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Install build tools and clone llama.cpp
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y build-essential git cmake ninja-build wget curl unzip
+          sudo apt-get install -y build-essential git cmake ninja-build wget curl unzip aria2 git-lfs
+          git lfs install
           git clone https://github.com/ggerganov/llama.cpp.git
           cd llama.cpp
           cmake -B build -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
@@ -42,7 +46,7 @@ jobs:
       - name: Show initial memory
         run: free -h
 
-      - name: Download GGUF Q4_K_M with fallbacks for ${{ matrix.size }}
+      - name: Download GGUF Q4_K_M – All Fallbacks for ${{ matrix.size }}
         run: |
           REPO=""
           FILE=""
@@ -65,26 +69,39 @@ jobs:
               ;;
           esac
 
-          echo "Trying HF CLI + hf_transfer first..."
-          HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download "$REPO" "$FILE" --local-dir . --local-dir-use-symlinks False || echo "HF CLI failed"
+          echo "=== Trying fallbacks for $FILE from $REPO ==="
 
-          if [ ! -f "$FILE" ]; then
-            echo "Fallback to curl with resume..."
-            curl -L -C - -o "$FILE" "https://huggingface.co/$REPO/resolve/main/$FILE" || echo "curl failed"
-          fi
+          # 1. huggingface-cli + hf_transfer (fastest)
+          HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download "$REPO" "$FILE" \
+            --local-dir . --local-dir-use-symlinks False && \
+            mv "$FILE" model.gguf && \
+            echo "Success: huggingface-cli" && exit 0 || echo "huggingface-cli failed"
 
-          if [ ! -f "$FILE" ]; then
-            echo "Last fallback: wget"
-            wget -O "$FILE" "https://huggingface.co/$REPO/resolve/main/$FILE" || echo "wget failed"
-          fi
+          # 2. curl with resume
+          curl -L -C - -o "$FILE" "https://huggingface.co/$REPO/resolve/main/$FILE" && \
+            mv "$FILE" model.gguf && \
+            echo "Success: curl" && exit 0 || echo "curl failed"
 
-          if [ -f "$FILE" ]; then
-            mv "$FILE" model.gguf
-            echo "Download succeeded"
-          else
-            echo "All download methods failed for ${{ matrix.size }}"
-            exit 1
-          fi
+          # 3. wget
+          wget -O "$FILE" "https://huggingface.co/$REPO/resolve/main/$FILE" && \
+            mv "$FILE" model.gguf && \
+            echo "Success: wget" && exit 0 || echo "wget failed"
+
+          # 4. aria2c multi-connection
+          aria2c -x 16 -s 16 "https://huggingface.co/$REPO/resolve/main/$FILE" -o "$FILE" && \
+            mv "$FILE" model.gguf && \
+            echo "Success: aria2c" && exit 0 || echo "aria2c failed"
+
+          # 5. git lfs clone full repo (last resort)
+          git clone https://huggingface.co/"$REPO" repo-temp
+          cd repo-temp
+          git lfs pull --include "$FILE"
+          cd ..
+          mv repo-temp/"$FILE" model.gguf && \
+            echo "Success: git lfs" && exit 0 || echo "git lfs failed"
+
+          echo "!!! ALL DOWNLOAD METHODS FAILED for ${{ matrix.size }} !!!"
+          exit 1
 
       - name: Show memory after download
         run: free -h
@@ -98,7 +115,7 @@ jobs:
             --ctx-size 2048 \
             --mmap \
             --n-gpu-layers 0 &  # CPU only
-          sleep 60 || echo "Server start timed out or failed"
+          sleep 60 || echo "Server start timed out"
 
       - name: Run benchmark (attempt ${{ matrix.attempt }})
         env:
