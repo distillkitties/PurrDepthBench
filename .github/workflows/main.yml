@@ -1,4 +1,4 @@
-name: PurrDepthBench – llama.cpp mmap Test (Qwopus GGUF)
+name: PurrDepthBench – llama.cpp mmap Test (Corrected URLs)
 
 on:
   workflow_dispatch:
@@ -29,7 +29,10 @@ jobs:
       - name: Install build tools and clone llama.cpp
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y build-essential git cmake ninja-build wget
+          sudo apt-get install -y build-essential git cmake ninja-build wget curl
+
+      - name: Clone and build llama.cpp server
+        run: |
           git clone https://github.com/ggerganov/llama.cpp.git
           cd llama.cpp
           cmake -B build -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
@@ -37,25 +40,42 @@ jobs:
           cp build/bin/llama-server ../llama-server
           cd ..
 
-      - name: Show initial memory (before anything)
+      - name: Show initial memory
         run: free -h
 
-      - name: Download correct GGUF Q4_K_M for ${{ matrix.size }}
+      - name: Download GGUF Q4_K_M with robust fallbacks for ${{ matrix.size }}
         run: |
           case "${{ matrix.size }}" in
             2b)
-              wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-2b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf || echo "2B download failed"
+              REPO="Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF"
+              FILE="Qwen3.5-2B.Q4_K_M.gguf"
               ;;
             4b)
-              wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-4b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf || echo "4B download failed"
+              REPO="Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-GGUF"
+              FILE="Qwen3.5-4B.Q4_K_M.gguf"
               ;;
             9b)
-              wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-9b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf || echo "9B download failed"
+              REPO="Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF"
+              FILE="Qwen3.5-9B.Q4_K_M.gguf"
               ;;
             27b)
-              wget -O model.gguf https://huggingface.co/Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF/resolve/main/qwen3.5-27b-claude-4.6-opus-reasoning-distilled-q4_k_m.gguf || echo "27B download failed"
+              REPO="Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF"
+              FILE="Qwen3.5-27B.Q4_K_M.gguf"
               ;;
           esac
+
+          echo "=== Downloading $FILE from $REPO ==="
+
+          # 1. curl (primary, with resume and progress)
+          curl -L -C - --progress-bar -o "$FILE" "https://huggingface.co/$REPO/resolve/main/$FILE" && \
+            [ -s "$FILE" ] && echo "curl success" && mv "$FILE" model.gguf && exit 0 || echo "curl failed"
+
+          # 2. wget fallback
+          wget --continue --progress=bar "https://huggingface.co/$REPO/resolve/main/$FILE" -O "$FILE" && \
+            [ -s "$FILE" ] && echo "wget success" && mv "$FILE" model.gguf && exit 0 || echo "wget failed"
+
+          echo "!!! ALL DOWNLOAD METHODS FAILED for ${{ matrix.size }} !!!"
+          exit 1
 
       - name: Show memory after download
         run: free -h
@@ -69,7 +89,7 @@ jobs:
             --ctx-size 2048 \
             --mmap \
             --n-gpu-layers 0 &  # CPU only
-          sleep 60 || echo "Server start timed out or failed"
+          sleep 60 || echo "Server start timed out"
 
       - name: Test inference with simple prompt
         run: |
@@ -80,7 +100,7 @@ jobs:
               "prompt": "Hello! Tell me a short joke.",
               "max_tokens": 50,
               "temperature": 0.7
-            }' || echo "Inference failed (likely due to paging/OOM)"
+            }' || echo "Inference failed (likely paging/OOM)"
 
       - name: Show final memory status
         run: free -h || true
@@ -93,7 +113,6 @@ jobs:
           path: |
             ./*.log
             ./*.txt
-            ./*.gguf
           retention-days: 7
 
   summary:
@@ -106,21 +125,21 @@ jobs:
         run: |
           echo "## llama.cpp mmap Test Summary (no swap)" >> summary.md
           echo "" >> summary.md
-          echo "Tested sizes in parallel:" >> summary.md
+          echo "Tested sizes:" >> summary.md
           echo "- 2B" >> summary.md
           echo "- 4B" >> summary.md
           echo "- 9B" >> summary.md
           echo "- 27B" >> summary.md
           echo "" >> summary.md
-          echo "### Results:" >> summary.md
+          echo "Results:" >> summary.md
           for s in 2b 4b 9b 27b; do
-            echo "- $s: $( [ -d artifacts/mmap-test-$s ] && echo 'OK' || echo 'Failed (OOM/timeout/download issue)')" >> summary.md
+            echo "- $s: $( [ -d "artifacts/mmap-test-$s" ] && echo 'OK' || echo 'Failed')" >> summary.md
           done
           echo "" >> summary.md
-          echo "Full logs and GGUF files in artifacts." >> summary.md
+          echo "Full logs in artifacts." >> summary.md
           cat summary.md
 
-      - name: Upload summary artifact
+      - name: Upload summary
         uses: actions/upload-artifact@v4
         with:
           name: mmap-summary
